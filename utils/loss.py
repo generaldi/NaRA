@@ -97,115 +97,52 @@ def compute_original_llada_loss(input_ids, denoiser, question_length, config, no
     
     # Prepare return variables
     noise_level_for_loss = None # For logging
-    
-    # --- 1. VARLENLORA LOGIC ---
-    # Check for VARLENLORA (Handling Enum or String attribute)
-    is_varlen = (finetuning_type == getattr(FINETUNING_TYPE, "VARLENLORA", "VARLENLORA"))
-    
-    if is_varlen:
+
+    # --- NARA: noise-conditioned forward ---
+    if finetuning_type == FINETUNING_TYPE.NARA:
         real_model = denoiser.module if hasattr(denoiser, "module") else denoiser
-        
-        # Set the Target Length Context
+        peft_cfg = real_model.peft_config['default']
 
-        if hasattr(real_model, "set_target_length"):
-            # answer_length is passed as the context.
-            # If batch_size > 1, this assumes we want the per-sample length or average.
-            # Since VarLenLoRA enforces batch_size=1, this tensor is effectively a scalar.
-            if selected_length:
-                real_model.set_target_length(selected_length)
-            else:
-                real_model.set_target_length(answer_length)
-                
-        logits = denoiser(noisy_batch).logits
-        
+        # Variables to pass to forward
+        current_nl = None
+        current_nd = None
 
-    # --- 2. NOISE-BASED LORA LOGIC (TLORA, NORA, CLORA, NARA) ---
-    elif finetuning_type in [FINETUNING_TYPE.TLORA, FINETUNING_TYPE.NORA, FINETUNING_TYPE.TNORA, FINETUNING_TYPE.CLORA, FINETUNING_TYPE.NARA]:
-            real_model = denoiser.module if hasattr(denoiser, "module") else denoiser
-            peft_cfg = real_model.peft_config['default']
-            
-            # Variables to pass to forward
+        # Calculate Noise Level
+        if getattr(peft_cfg, "direct_noise_level", True):
+            calculated_nl = ratios
+        else:
+            masked_indices_float = masked_indices.float()
+            calculated_nl = masked_indices_float.mean(dim=1, keepdim=True)
+
+        input_mode = getattr(peft_cfg, "input_mode", "nl")
+        if input_mode == "constant":
+            # Constant mode: no noise info needed
             current_nl = None
             current_nd = None
-            
-            # Calculate Noise Level
-            if getattr(peft_cfg, "direct_noise_level", True):
-                calculated_nl = ratios
-            else:
-                masked_indices_float = masked_indices.float()
-                calculated_nl = masked_indices_float.mean(dim=1, keepdim=True)
-                
-            # Logic for CLORA
-            if finetuning_type in (FINETUNING_TYPE.CLORA,):
-                input_components = getattr(peft_cfg, "input_components", [])
-                if "nl" in input_components:
-                    current_nl = calculated_nl
-                if "nd" in input_components:
-                    radius = getattr(peft_cfg, "density_radius", None)
-                    current_nd = calculate_global_mask_density(masked_indices, r=radius)
-                    
-            elif finetuning_type in (FINETUNING_TYPE.NARA,):
-                input_mode = getattr(peft_cfg, "input_mode", "nl")
-                if input_mode == "constant":
-                    # Constant mode: no noise info needed
-                    current_nl = None
-                    current_nd = None
-                elif input_mode == "nl":
-                    current_nl = calculated_nl
-                elif input_mode == "nd":
-                    radius = peft_cfg.density_radius
-                    current_nd = calculate_global_mask_density(masked_indices, r=radius)
-                elif input_mode == "both":
-                    current_nl = calculated_nl
-                    radius = peft_cfg.density_radius
-                    current_nd = calculate_global_mask_density(masked_indices, r=radius)
-        
-            # Logic for NORA/Others
-            else:
-                input_mode = getattr(peft_cfg, "input_mode", "noise_level")
-                if input_mode in ["noise_density", "both"]:
-                    radius = peft_cfg.density_radius
-                    current_nd = calculate_global_mask_density(masked_indices, r=radius)
+        elif input_mode == "nl":
+            current_nl = calculated_nl
+        elif input_mode == "nd":
+            radius = peft_cfg.density_radius
+            current_nd = calculate_global_mask_density(masked_indices, r=radius)
+        elif input_mode == "both":
+            current_nl = calculated_nl
+            radius = peft_cfg.density_radius
+            current_nd = calculate_global_mask_density(masked_indices, r=radius)
 
-                if input_mode == "noise_level":
-                    current_nl = calculated_nl
-                elif input_mode == "noise_density":
-                    current_nd = current_nd
-                elif input_mode == "both":
-                    current_nl = calculated_nl
-                    current_nd = current_nd
+        # Forward Pass using helper
+        logits = forward_with_noise_level(
+            denoiser,
+            noisy_batch,
+            noise_level=current_nl,
+            noise_density=current_nd
+        )
 
-            # Forward Pass using helper
-            logits = forward_with_noise_level(
-                denoiser, 
-                noisy_batch, 
-                noise_level=current_nl, 
-                noise_density=current_nd
-            )
-            
-            noise_level_for_loss = calculated_nl
-
-    # --- 3. DORA_V2 LOGIC (uses set_context_state with only noise_level) ---
-    elif finetuning_type == FINETUNING_TYPE.DORA_V2:
-        real_model = denoiser.module if hasattr(denoiser, "module") else denoiser
-
-        # Calculate noise level from ratios
-        calculated_nl = ratios
-
-        # Set context state for DoRA_V2 (only noise_level)
-        if hasattr(real_model, "set_context_state"):
-            real_model.set_context_state(noise_level=calculated_nl)
-
-        logits = denoiser(noisy_batch).logits
         noise_level_for_loss = calculated_nl
 
-    # --- 4. BASELINE LOGIC ---
+    # --- BASELINE ---
     else:
         logits = denoiser(noisy_batch).logits
-        # import pdb; pdb.set_trace()
-    if finetuning_type in (FINETUNING_TYPE.PTUNING,FINETUNING_TYPE.PROMPT_TUNING,):
-        num_virtual_tokens = config.finetuning_parameters.get("num_virtual_tokens",None)
-        logits = logits[:, num_virtual_tokens:, :]
+
     token_loss = F.cross_entropy(logits[masked_indices], input_ids[masked_indices], reduction="none") / answer_length
         
     use_cross_entropy = config.eval.get("use_cross_entropy", False) if hasattr(config, "eval") else False
@@ -225,19 +162,18 @@ def compute_original_llada_loss(input_ids, denoiser, question_length, config, no
     # We return the noise data so the main loop can cache it if needed
     noise_data_payload = (noisy_batch, masked_indices, ratios)
     # Construct Return Dictionary
-    if finetuning_type in [FINETUNING_TYPE.TLORA, FINETUNING_TYPE.NORA, FINETUNING_TYPE.TNORA, FINETUNING_TYPE.CLORA, FINETUNING_TYPE.DORA_V2]:
+    if finetuning_type == FINETUNING_TYPE.NARA:
         losses = {
             "loss": token_loss.sum()/ratios,
-            "noise_level": noise_level_for_loss, 
-            "masked_indices": masked_indices, 
-            "noise_data_cache": noise_data_payload 
+            "noise_level": noise_level_for_loss,
+            "masked_indices": masked_indices,
+            "noise_data_cache": noise_data_payload
         }
     else:
-        # VarLenLoRA falls here (no noise level to log specific to the adapter)
         losses = {
             "loss": token_loss.sum()/ratios,
             "masked_indices": masked_indices,
-            "noise_data_cache": noise_data_payload 
+            "noise_data_cache": noise_data_payload
         }
     return losses
 

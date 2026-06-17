@@ -3,6 +3,11 @@ model: 'llada_instruct'
 finetuning_method: 'nara'
 task_name: 'commonsense170k'
 
+# Output paths
+paths:
+  experiment: 'experiments'   # root dir; checkpoints go to <experiment>/<exp_name>/<output_dir>
+  results_dir: ''             # optional: dir for ablation CSV results (leave empty to skip)
+
 finetuning_parameters:
   r_ab: 32
   lora_dropout: 0.05

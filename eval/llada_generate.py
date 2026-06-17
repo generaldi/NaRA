@@ -405,53 +405,21 @@ def generate(
     #        CONFIGURATION SETUP
     # ==========================================
     
-    nora_input_mode = None
-    nora_density_radius = None
-    clora_input_components = []
-    clora_density_radius = None
+    nara_input_components = None
+    nara_density_radius = None
 
-    # --- 1. NORA Configuration Setup (Original Logic) ---
-    if finetuning_type == FINETUNING_TYPE.NORA:
+    # --- NARA Configuration Setup ---
+    if finetuning_type == FINETUNING_TYPE.NARA:
         real_model = model.module if hasattr(model, "module") else model
         peft_cfg = getattr(real_model, "peft_config", {}).get('default', None)
-        
-        if peft_cfg is None:
-            raise ValueError("Finetuning type is NORA, but no default adapter config found.")
-        
-        if not hasattr(peft_cfg, "input_mode"):
-            raise ValueError("NORA adapter config is missing 'input_mode'.")
-        
-        nora_input_mode = peft_cfg.input_mode
-        
-        if nora_input_mode in ["noise_density", "both"]:
-            if not hasattr(peft_cfg, "density_radius") or peft_cfg.density_radius is None:
-                raise ValueError(f"NORA input_mode is '{nora_input_mode}' but 'density_radius' is missing or None.")
-            nora_density_radius = peft_cfg.density_radius
 
-    # --- 2. CLoRA Configuration Setup (New Logic) ---
-    elif finetuning_type == FINETUNING_TYPE.CLORA:
-        real_model = model.module if hasattr(model, "module") else model
-        peft_cfg = getattr(real_model, "peft_config", {}).get('default', None)
-        
         if peft_cfg is not None:
-            # Retrieve CLoRA specific attributes
-            clora_input_components = getattr(peft_cfg, "input_components", [])
-            clora_density_radius = getattr(peft_cfg, "density_radius", None)
-            
-            # Validation
-            if "nd" in clora_input_components and clora_density_radius is None:
-                raise ValueError("CLORA config uses 'nd' (Noise Density) but 'density_radius' is missing/None.")
-    elif finetuning_type == FINETUNING_TYPE.NARA:
-        real_model = model.module if hasattr(model, "module") else model
-        peft_cfg = getattr(real_model, "peft_config", {}).get('default', None)
-        
-        if peft_cfg is not None:
-            # Retrieve CLoRA specific attributes
+            # Retrieve NARA-specific attributes
             nara_input_components = getattr(peft_cfg, "input_mode", None)
             nara_density_radius = getattr(peft_cfg, "density_radius", None)
-            
+
             # Validation
-            if nara_input_components in ("nd","both") and nara_density_radius is None:
+            if nara_input_components in ("nd", "both") and nara_density_radius is None:
                 raise ValueError("NARA config uses 'nd' (Noise Density) but 'density_radius' is missing/None.")
     # ==========================================
     #        GENERATION LOOP
@@ -473,129 +441,11 @@ def generate(
         for i in range(steps):
             mask_index = (x == mask_id)
 
-            # --- BRANCH 1: NORA (Original Logic) ---
-            if finetuning_type == FINETUNING_TYPE.NORA:
-                
-                def get_nora_args(batch_mask_index, raw_noise_level):
-                    """NORA-specific argument resolver based on input_mode string"""
-                    args = {"randomize_noise": random_noise}
-                    
-                    # Calculate Density if needed
-                    nd = None
-                    if nora_input_mode in ["noise_density", "both"]:
-                        nd = calculate_global_mask_density(batch_mask_index, r=nora_density_radius)
-                    
-                    # Assign based on mode
-                    if nora_input_mode == "noise_level":
-                        args["noise_level"] = raw_noise_level
-                        args["noise_density"] = None
-                    elif nora_input_mode == "noise_density":
-                        args["noise_level"] = None
-                        args["noise_density"] = nd
-                    elif nora_input_mode == "both":
-                        args["noise_level"] = raw_noise_level
-                        args["noise_density"] = nd
-                        
-                    return args
-
-                if cfg_scale > 0.0:
-                    un_x = x.clone()
-                    if not direct_noise:
-                        # Guided
-                        guided_masked_indices_float = (x == mask_id).float()
-                        guided_noise_level = guided_masked_indices_float.mean(dim=1, keepdim=True)
-                        fwd_args = get_nora_args(mask_index, guided_noise_level)
-                        logits_guided = forward_with_noise_level(model, x, **fwd_args)
-                        
-                        # Unguided
-                        un_x[prompt_index] = mask_id
-                        unguided_masked_indices_float = (un_x == mask_id).float()
-                        unguided_noise_level = unguided_masked_indices_float.mean(dim=1, keepdim=True)
-                        un_mask_index = (un_x == mask_id)
-                        fwd_args_un = get_nora_args(un_mask_index, unguided_noise_level)
-                        logits_unguided = forward_with_noise_level(model, un_x, **fwd_args_un)
-
-                        logits = logits_unguided + (cfg_scale + 1) * (logits_guided - logits_unguided)
-                    else:
-                        # Direct noise logic
-                        guided_noise_level = _noise_level_excluding_prompt(x, prompt_index, mask_id)
-                        fwd_args = get_nora_args(mask_index, guided_noise_level)
-                        logits_guided = forward_with_noise_level(model, x, **fwd_args)
-                        logits_unguided = forward_with_noise_level(model, un_x, **fwd_args)
-                        logits = logits_unguided + (cfg_scale + 1) * (logits_guided - logits_unguided)
-                else:
-                    if not direct_noise:
-                        masked_indices_float = (x == mask_id).float()
-                        noise_level = masked_indices_float.mean(dim=1, keepdim=True)
-                        fwd_args = get_nora_args(mask_index, noise_level)
-                        logits = forward_with_noise_level(model, x, **fwd_args)
-                    else:
-                        noise_level = _noise_level_excluding_prompt(x, prompt_index, mask_id)
-                        fwd_args = get_nora_args(mask_index, noise_level)
-                        logits = forward_with_noise_level(model, x, **fwd_args)
-
-            # --- BRANCH 2: CLORA (New Logic) ---
-            elif finetuning_type == FINETUNING_TYPE.CLORA:
-                
-                def get_clora_args(batch_mask_index, raw_noise_level):
-                    """CLoRA-specific argument resolver based on input_components list"""
-                    args = {"randomize_noise": random_noise}
-                    
-                    # 1. Noise Level (nl)
-                    if "nl" in clora_input_components:
-                        args["noise_level"] = raw_noise_level
-                    else:
-                        args["noise_level"] = None
-
-                    # 2. Noise Density (nd)
-                    if "nd" in clora_input_components:
-                        nd = calculate_global_mask_density(batch_mask_index, r=clora_density_radius)
-                        args["noise_density"] = nd
-                    else:
-                        args["noise_density"] = None
-                        
-                    return args
-
-                if cfg_scale > 0.0:
-                    un_x = x.clone()
-                    if not direct_noise:
-                        # Guided
-                        guided_masked_indices_float = (x == mask_id).float()
-                        guided_noise_level = guided_masked_indices_float.mean(dim=1, keepdim=True)
-                        fwd_args = get_clora_args(mask_index, guided_noise_level)
-                        logits_guided = forward_with_noise_level(model, x, **fwd_args)
-                        
-                        # Unguided
-                        un_x[prompt_index] = mask_id
-                        unguided_masked_indices_float = (un_x == mask_id).float()
-                        unguided_noise_level = unguided_masked_indices_float.mean(dim=1, keepdim=True)
-                        un_mask_index = (un_x == mask_id)
-                        fwd_args_un = get_clora_args(un_mask_index, unguided_noise_level)
-                        logits_unguided = forward_with_noise_level(model, un_x, **fwd_args_un)
-
-                        logits = logits_unguided + (cfg_scale + 1) * (logits_guided - logits_unguided)
-                    else:
-                        # Direct noise logic
-                        guided_noise_level = _noise_level_excluding_prompt(x, prompt_index, mask_id)
-                        fwd_args = get_clora_args(mask_index, guided_noise_level)
-                        logits_guided = forward_with_noise_level(model, x, **fwd_args)
-                        logits_unguided = forward_with_noise_level(model, un_x, **fwd_args)
-                        logits = logits_unguided + (cfg_scale + 1) * (logits_guided - logits_unguided)
-                else:
-                    if not direct_noise:
-                        masked_indices_float = (x == mask_id).float()
-                        noise_level = masked_indices_float.mean(dim=1, keepdim=True)
-                        fwd_args = get_clora_args(mask_index, noise_level)
-                        logits = forward_with_noise_level(model, x, **fwd_args)
-                    else:
-                        noise_level = _noise_level_excluding_prompt(x, prompt_index, mask_id)
-                        fwd_args = get_clora_args(mask_index, noise_level)
-                        logits = forward_with_noise_level(model, x, **fwd_args)
-            # --- BRANCH 3: NARA (New Logic) ---
-            elif finetuning_type == FINETUNING_TYPE.NARA:
+            # --- BRANCH: NARA ---
+            if finetuning_type == FINETUNING_TYPE.NARA:
                 
                 def get_nara_args(batch_mask_index, raw_noise_level):
-                    """CLoRA-specific argument resolver based on input_components list"""
+                    """NARA argument resolver based on the adapter's input_mode."""
                     args = {"randomize_noise": random_noise}
                     
                     # 1. Noise Level (nl)
@@ -648,124 +498,17 @@ def generate(
                         noise_level = _noise_level_excluding_prompt(x, prompt_index, mask_id)
                         fwd_args = get_nara_args(mask_index, noise_level)
                         logits = forward_with_noise_level(model, x, **fwd_args)
-            # --- BRANCH 3: TLORA / TNORA (Original Logic) ---
-            elif finetuning_type in (FINETUNING_TYPE.TLORA, FINETUNING_TYPE.TNORA):
-                if cfg_scale > 0.0:
-                    un_x = x.clone()
-                    if not direct_noise:
-                        guided_masked_indices_float = (x == mask_id).float()
-                        guided_noise_level = guided_masked_indices_float.mean(
-                            dim=1, keepdim=True
-                        )
-                        
-                        logits_guided = forward_with_noise_level(
-                            model, x, guided_noise_level, noise_density=None, randomize_noise=random_noise
-                        )
-                        un_x[prompt_index] = mask_id
-                        unguided_masked_indices_float = (un_x == mask_id).float()
-                        unguided_noise_level = unguided_masked_indices_float.mean(
-                            dim=1, keepdim=True
-                        )
-                        logits_unguided = forward_with_noise_level(
-                            model, un_x, unguided_noise_level, noise_density=None, randomize_noise=random_noise
-                        )
-                        logits = logits_unguided + (cfg_scale + 1) * (
-                            logits_guided - logits_unguided
-                        )
-                    else:
-                        guided_noise_level=_noise_level_excluding_prompt(x, prompt_index, mask_id)
-                        logits_guided = forward_with_noise_level(
-                            model, x, guided_noise_level, noise_density=None, randomize_noise=random_noise
-                        )
-                        logits_unguided = forward_with_noise_level(
-                            model, un_x, guided_noise_level, noise_density=None, randomize_noise=random_noise
-                        )
-                        logits = logits_unguided + (cfg_scale + 1) * (
-                            logits_guided - logits_unguided
-                        )
-
-                else:
-                    if not direct_noise:
-                        masked_indices_float = (x == mask_id).float()
-                        noise_level = masked_indices_float.mean(dim=1, keepdim=True)
-                        logits = forward_with_noise_level(
-                            model, x, noise_level, noise_density=None, randomize_noise=random_noise
-                        )
-                    else:
-                        noise_level=_noise_level_excluding_prompt(x, prompt_index, mask_id)
-                        logits = forward_with_noise_level(
-                            model, x, noise_level, noise_density=None, randomize_noise=random_noise
-                        )
-
-            # --- BRANCH 4: DORA_V2 (uses simple set_context_state with noise_level only) ---
-            elif finetuning_type == FINETUNING_TYPE.DORA_V2:
-                if cfg_scale > 0.0:
-                    un_x = x.clone()
-                    if not direct_noise:
-                        guided_masked_indices_float = (x == mask_id).float()
-                        guided_noise_level = guided_masked_indices_float.mean(
-                            dim=1, keepdim=True
-                        )
-
-                        logits_guided = forward_with_noise_level(
-                            model, x, guided_noise_level, noise_density=None, randomize_noise=random_noise
-                        )
-                        un_x[prompt_index] = mask_id
-                        unguided_masked_indices_float = (un_x == mask_id).float()
-                        unguided_noise_level = unguided_masked_indices_float.mean(
-                            dim=1, keepdim=True
-                        )
-                        logits_unguided = forward_with_noise_level(
-                            model, un_x, unguided_noise_level, noise_density=None, randomize_noise=random_noise
-                        )
-                        logits = logits_unguided + (cfg_scale + 1) * (
-                            logits_guided - logits_unguided
-                        )
-                    else:
-                        guided_noise_level = _noise_level_excluding_prompt(x, prompt_index, mask_id)
-                        logits_guided = forward_with_noise_level(
-                            model, x, guided_noise_level, noise_density=None, randomize_noise=random_noise
-                        )
-                        logits_unguided = forward_with_noise_level(
-                            model, un_x, guided_noise_level, noise_density=None, randomize_noise=random_noise
-                        )
-                        logits = logits_unguided + (cfg_scale + 1) * (
-                            logits_guided - logits_unguided
-                        )
-                else:
-                    if not direct_noise:
-                        masked_indices_float = (x == mask_id).float()
-                        noise_level = masked_indices_float.mean(dim=1, keepdim=True)
-                        logits = forward_with_noise_level(
-                            model, x, noise_level, noise_density=None, randomize_noise=random_noise
-                        )
-                    else:
-                        noise_level = _noise_level_excluding_prompt(x, prompt_index, mask_id)
-                        logits = forward_with_noise_level(
-                            model, x, noise_level, noise_density=None, randomize_noise=random_noise
-                        )
-
-            # --- BRANCH 5: BASELINE / OTHERS ---
+            # --- BRANCH: BASELINE (no adapter) ---
             else:
                 if cfg_scale > 0.0:
                     un_x = x.clone()
                     un_x[prompt_index] = mask_id
                     x_ = torch.cat([x, un_x], dim=0)
                     logits = model(x_).logits
-                    if finetuning_type in (FINETUNING_TYPE.PTUNING,FINETUNING_TYPE.PROMPT_TUNING,):
-                        adapter_name = model.active_adapter
-                        current_config = model.peft_config[adapter_name]
-                        num_virtual_tokens = current_config.num_virtual_tokens
-                        logits = logits[:, num_virtual_tokens:, :]
                     logits, un_logits = torch.chunk(logits, 2, dim=0)
                     logits = un_logits + (cfg_scale + 1) * (logits - un_logits)
                 else:
                     logits = model(x).logits
-                    if finetuning_type in (FINETUNING_TYPE.PTUNING,FINETUNING_TYPE.PROMPT_TUNING,):
-                        adapter_name = model.active_adapter
-                        current_config = model.peft_config[adapter_name]
-                        num_virtual_tokens = current_config.num_virtual_tokens
-                        logits = logits[:, num_virtual_tokens:, :]
 
             logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
             x0 = torch.argmax(logits_with_noise, dim=-1)  # b, l

@@ -4,6 +4,7 @@ from .format_input import (
     TASK_PATHS_MAPPING,
     MAX_LENGTH_MAPPING,
     MASK_ID_MAPPING,
+    CKPT_MAPPING,
 )
 
 
@@ -18,6 +19,7 @@ __all__ = [
     TASK_PATHS_MAPPING,
     MAX_LENGTH_MAPPING,
     MASK_ID_MAPPING,
+    CKPT_MAPPING,
     get_type,
     set_seed,
 ]

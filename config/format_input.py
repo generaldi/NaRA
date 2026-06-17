@@ -223,3 +223,23 @@ MASK_ID_MAPPING = {
     MODEL_TYPE.LLADA_BASE: 126336,
 }
 
+
+# Registry of trained NARA checkpoints used at evaluation time.
+# Keyed by (MODEL_TYPE, TASK_TYPE, FINETUNING_TYPE); the value is a list of
+# checkpoint directories indexed by `run_time` (1-based), i.e. CKPT_MAPPING[key][run_time - 1].
+#
+# Fill in the path produced by training (e.g. an exp dir's `ckpts/BEST_loss_...`
+# or `ckpts/FINAL_...` folder). Alternatively, you can bypass this mapping by
+# passing `peft_name=<path-to-checkpoint-dir>` directly in --model_args.
+CKPT_MAPPING = {
+    (MODEL_TYPE.LLADA_INSTRUCT, TASK_TYPE.MATH14K, FINETUNING_TYPE.NARA): [
+        "",  # run_time=1
+    ],
+    (MODEL_TYPE.LLADA_INSTRUCT, TASK_TYPE.COMMONSENSE170K, FINETUNING_TYPE.NARA): [
+        "",  # run_time=1
+    ],
+    (MODEL_TYPE.LLADA_INSTRUCT, TASK_TYPE.CODE_FEEDBACK, FINETUNING_TYPE.NARA): [
+        "",  # run_time=1
+    ],
+}
+

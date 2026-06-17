@@ -2,15 +2,18 @@
 torch>=2.0.0
 transformers==4.49.0
 accelerate==0.34.2
-peft==0.18.0
+peft==0.15.2
 omegaconf>=2.3.0
 
 # Evaluation
 lm_eval==0.4.8
-antlr4-python3-runtime==4.11
+# NOTE: do NOT pin antlr4-python3-runtime==4.11 — it conflicts with omegaconf
+# (needs 4.9.*). omegaconf/lm_eval pull in a compatible antlr4 (4.9.x) transitively,
+# and math_verify works fine on that version.
 math_verify
 sympy
 hf_xet
+fraction
 
 # Training utilities
 datasets>=2.0.0
